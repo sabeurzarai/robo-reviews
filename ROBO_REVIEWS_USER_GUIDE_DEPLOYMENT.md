@@ -381,14 +381,27 @@ aws s3 cp s3://robo-reviews-data-024820689060-eu-central-1-an/submissions.csv da
 
 ### 9.6 Build and run
 
+> **Note**: `docker-compose` binary is at `/usr/local/bin/`. If you get `command not found` after reconnecting, run `export PATH=$PATH:/usr/local/bin` first.
+
 ```bash
+export PATH=$PATH:/usr/local/bin
 cd ~/robo-reviews
 docker-compose up --build -d
 docker-compose ps
-docker-compose logs -f backend
 ```
 
-Open:
+If containers show empty after reconnect (session expired), just start them again — the image is already built:
+```bash
+docker-compose up -d
+```
+
+Check logs if something is wrong:
+```bash
+docker-compose logs --tail=30 backend
+docker-compose logs --tail=30 streamlit
+```
+
+Open in browser:
 
 ```
 http://18.157.233.122:8000/docs   ← FastAPI Swagger
@@ -397,9 +410,24 @@ http://18.157.233.122:8501        ← Streamlit UI
 
 In the Streamlit sidebar, change the API URL to `http://18.157.233.122:8000`.
 
-### 9.7 Update the deployed app
+### 9.7 Connect to EC2 (recommended method)
+
+Use **EC2 Instance Connect** from the AWS console — no `.pem` file needed:
+
+1. EC2 Console → select instance `i-0d417541e6f5ad699` → click **Connect**
+2. Tab: **EC2 Instance Connect** → Connection type: **Public IP** → click **Connect**
+
+This opens a browser-based terminal. Faster and more reliable than CloudShell for SSH.
+
+Alternatively from CloudShell:
+```bash
+aws ec2-instance-connect ssh --instance-id i-0d417541e6f5ad699 --region eu-central-1 --os-user ubuntu
+```
+
+### 9.8 Update the deployed app
 
 ```bash
+export PATH=$PATH:/usr/local/bin
 cd ~/robo-reviews
 git pull
 docker-compose down
