@@ -62,7 +62,6 @@ robo-reviews/
 ├── Dockerfile
 ├── docker-compose.yml
 ├── README.md
-├── CLAUDE.md
 └── ROBO_REVIEWS_USER_GUIDE_DEPLOYMENT.md
 ```
 
@@ -437,7 +436,7 @@ Side effects: writes `outputs/clustered_reviews.csv` and `outputs/category_insig
 
 ### 11.3 `POST /predict-sentiment`
 
-Single text → label. Heuristic-only (see CLAUDE.md rule 5): reacts to a fixed hint-word list. Anything outside that list → `neutral`.
+Single text → label. Heuristic-only: reacts to a fixed hint-word list. Anything outside that list → `neutral`.
 
 **Positive:**
 ```json
