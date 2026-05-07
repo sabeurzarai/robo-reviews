@@ -1,0 +1,29 @@
+services:
+  backend:
+    build: .
+    container_name: robo-reviews-api
+    command: uvicorn backend.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./outputs:/app/outputs
+      - ./models:/app/models
+    environment:
+      - PYTHONPATH=/app
+      - ROBO_REVIEWS_ROOT=/app
+
+  streamlit:
+    build: .
+    container_name: robo-reviews-ui
+    command: streamlit run streamlit_app/app.py --server.address 0.0.0.0 --server.port 8501
+    depends_on:
+      - backend
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+      - ./outputs:/app/outputs
+    environment:
+      - PYTHONPATH=/app
+      - ROBO_REVIEWS_API_URL=http://backend:8000

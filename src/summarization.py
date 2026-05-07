@@ -1,0 +1,118 @@
+"""Recommendation article generation."""
+from __future__ import annotations
+
+import logging
+from functools import lru_cache
+
+from transformers import pipeline
+
+from src.config import SUMMARY_MODEL_NAME
+
+logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=1)
+def load_summarizer():
+    """Load FLAN-T5 lazily; this keeps tests and health checks lightweight."""
+    logger.info("Loading summary model: %s", SUMMARY_MODEL_NAME)
+    return pipeline(
+        "text2text-generation",
+        model=SUMMARY_MODEL_NAME,
+        max_new_tokens=450,
+        no_repeat_ngram_size=3,
+        repetition_penalty=1.5,
+        num_beams=4,
+        early_stopping=True,
+    )
+
+
+def build_safe_prompt(category_insight: dict) -> str:
+    """Build an LLM prompt from structured insights only.
+
+    Raw reviews are intentionally excluded. This reduces privacy risk and gives the
+    model the clean facts it needs without inviting it to quote customers.
+    """
+    top = "\n".join(
+        f"- {p['name']} | rating {p['avg_rating']} | positive ratio {p['positive_ratio']} | reviews {p['review_count']} | score {p['score']}"
+        for p in category_insight["top_products"]
+    )
+    complaints = ", ".join(category_insight["complaints"])
+    worst = category_insight["worst_product"]
+
+    return f"""
+Write a helpful, natural product recommendation article in a Wirecutter-style voice.
+
+Use only these structured facts. Do not mention raw customer reviews or invent test results.
+
+Category: {category_insight['category_name']}
+Average rating: {category_insight['avg_rating']}
+Review count: {category_insight['review_count']}
+Sentiment ratio: {category_insight['sentiment_ratio']}
+Top products:
+{top}
+Worst product:
+- {worst['name']} | rating {worst['avg_rating']} | negative reviews {worst['negative_reviews']} | reviews {worst['review_count']}
+Common complaints: {complaints}
+
+Format:
+- Clear headline
+- Best overall
+- Also worth considering
+- What to watch out for
+- Bottom line
+""".strip()
+
+
+class RecommendationWriter:
+    """Creates category recommendation articles from aggregated facts."""
+
+    def generate(self, category_insight: dict) -> str:
+        """Generate a polished article, falling back gracefully if the model is unavailable."""
+        prompt = build_safe_prompt(category_insight)
+        try:
+            generator = load_summarizer()
+            result = generator(prompt)[0]["generated_text"].strip()
+            words = result.split()
+            unique_ratio = len(set(words)) / len(words) if words else 0
+            if len(words) >= 60 and unique_ratio >= 0.15:
+                return result
+            logger.warning("LLM output failed quality check (words=%d, unique_ratio=%.2f); using deterministic fallback", len(words), unique_ratio)
+        except Exception as exc:  # pragma: no cover - depends on model availability
+            logger.warning("Summary model unavailable, using deterministic article fallback: %s", exc)
+
+        return self._fallback_article(category_insight)
+
+    def _fallback_article(self, insight: dict) -> str:
+        """A readable backup keeps the product useful even without model downloads."""
+        top = insight["top_products"]
+        best = top[0]
+        alternatives = top[1:]
+        alt_text = "\n".join(
+            f"- **{item['name']}** is a strong backup pick, with a {item['avg_rating']} average rating and {item['review_count']} reviews."
+            for item in alternatives
+        ) or "- There was not enough depth in this category to recommend a second pick confidently."
+
+        complaints = ", ".join(insight["complaints"])
+        worst = insight["worst_product"]
+
+        return f"""# Best picks in {insight['category_name']}
+
+## Best overall: {best['name']}
+
+{best['name']} rises to the top because it balances a strong average rating of {best['avg_rating']} with a healthy positive sentiment ratio of {best['positive_ratio']}. It also has enough review volume to make the signal more trustworthy than a one-off favorite.
+
+## Also worth considering
+
+{alt_text}
+
+## What to watch out for
+
+The most common concerns in this category are {complaints}. That does not mean every buyer will run into those problems, but they are the issues worth checking before you buy.
+
+## Product to be cautious with
+
+{worst['name']} had the weakest rating profile in this cluster, averaging {worst['avg_rating']} across {worst['review_count']} reviews.
+
+## Bottom line
+
+Start with {best['name']} if you want the safest pick. Look at the runner-up options when price, availability, or a specific feature matters more than the overall score."""
