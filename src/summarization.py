@@ -18,15 +18,10 @@ def load_summarizer():
     return pipeline(
         "text2text-generation",
         model=SUMMARY_MODEL_NAME,
-        max_new_tokens=450,
-        no_repeat_ngram_size=3,
-        repetition_penalty=1.5,
-        num_beams=4,
-        early_stopping=True,
     )
 
 
-def build_safe_prompt(category_insight: dict) -> str:
+def build_safe_prompt(category_insight: dict, tone: str = "Professional buying guide") -> str:
     """Build an LLM prompt from structured insights only.
 
     Raw reviews are intentionally excluded. This reduces privacy risk and gives the
@@ -40,7 +35,8 @@ def build_safe_prompt(category_insight: dict) -> str:
     worst = category_insight["worst_product"]
 
     return f"""
-Write a helpful, natural product recommendation article in a Wirecutter-style voice.
+Write a helpful, natural product recommendation article.
+Tone: {tone}.
 
 Use only these structured facts. Do not mention raw customer reviews or invent test results.
 
@@ -66,19 +62,60 @@ Format:
 class RecommendationWriter:
     """Creates category recommendation articles from aggregated facts."""
 
-    def generate(self, category_insight: dict) -> str:
-        """Generate a polished article, falling back gracefully if the model is unavailable."""
-        prompt = build_safe_prompt(category_insight)
+    def generate(
+        self,
+        category_insight: dict,
+        temperature: float = 0.3,
+        max_new_tokens: int = 450,
+        tone: str = "Professional buying guide",
+        use_fallback: bool = True,
+    ) -> str:
+        """Generate a polished article, falling back gracefully if the model is unavailable.
+
+        FLAN-T5-base is small and frequently drops content under beam search with
+        repetition penalties, producing fluent-but-incomplete articles. The
+        quality gate below is intentionally strict: the deterministic fallback
+        is itself a Wirecutter-style article built from the same structured
+        facts, so falling back never hurts the user.
+        """
+        prompt = build_safe_prompt(category_insight, tone=tone)
+        required_markers = ("Best overall", "Bottom line")
         try:
             generator = load_summarizer()
-            result = generator(prompt)[0]["generated_text"].strip()
+            safe_temperature = max(0.0, min(float(temperature), 1.0))
+            generation_kwargs = {
+                "max_new_tokens": int(max_new_tokens),
+                "no_repeat_ngram_size": 3,
+                "repetition_penalty": 1.5,
+                "early_stopping": True,
+            }
+            if safe_temperature > 0:
+                generation_kwargs.update(
+                    {
+                        "do_sample": True,
+                        "temperature": safe_temperature,
+                        "num_beams": 1,
+                    }
+                )
+            else:
+                generation_kwargs.update({"do_sample": False, "num_beams": 4})
+
+            result = generator(prompt, **generation_kwargs)[0]["generated_text"].strip()
             words = result.split()
             unique_ratio = len(set(words)) / len(words) if words else 0
-            if len(words) >= 60 and unique_ratio >= 0.15:
+            has_structure = all(marker.lower() in result.lower() for marker in required_markers)
+            if len(words) >= 150 and unique_ratio >= 0.35 and has_structure:
                 return result
-            logger.warning("LLM output failed quality check (words=%d, unique_ratio=%.2f); using deterministic fallback", len(words), unique_ratio)
+            logger.warning(
+                "LLM output failed quality check (words=%d, unique_ratio=%.2f, structure=%s); using deterministic fallback",
+                len(words), unique_ratio, has_structure,
+            )
+            if not use_fallback and result:
+                return result
         except Exception as exc:  # pragma: no cover - depends on model availability
             logger.warning("Summary model unavailable, using deterministic article fallback: %s", exc)
+            if not use_fallback:
+                raise
 
         return self._fallback_article(category_insight)
 

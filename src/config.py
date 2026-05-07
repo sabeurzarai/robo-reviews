@@ -31,8 +31,8 @@ SUMMARY_MODEL_NAME = "google/flan-t5-base"
 NEUTRAL_CONFIDENCE_THRESHOLD = 0.85
 
 MIN_CLUSTERS = 4
-MAX_CLUSTERS = 6
-DEFAULT_CLUSTERS = 5
+MAX_CLUSTERS = 10
+DEFAULT_CLUSTERS = 6
 TOP_N_PRODUCTS = 3
 
 # Review count can be much larger than rating/ratio, so we normalize it before scoring.

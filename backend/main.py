@@ -159,7 +159,13 @@ def category_insights() -> list[dict]:
 def generate_summary(payload: SummaryRequest) -> SummaryResponse:
     """Generate a recommendation article from aggregated insights only."""
     try:
-        article = writer.generate(payload.category_insight)
+        article = writer.generate(
+            payload.category_insight,
+            temperature=payload.temperature,
+            max_new_tokens=payload.max_new_tokens,
+            tone=payload.tone,
+            use_fallback=payload.use_fallback,
+        )
         return SummaryResponse(article=article)
     except Exception as exc:
         logger.exception("Summary generation failed")

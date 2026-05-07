@@ -92,8 +92,6 @@ st.session_state.setdefault("_last_run_ts", None)
 st.session_state.setdefault("clustered_df", None)
 st.session_state.setdefault("insights", None)
 st.session_state.setdefault("articles", {})
-st.session_state.setdefault("playground_text", "")
-st.session_state.setdefault("heuristic_eval", None)
 st.session_state.setdefault("stage_summary", [])
 
 _rc = st.session_state["_reset_counter"]
@@ -112,6 +110,15 @@ def get_clusterer() -> ProductClusterer:
 @st.cache_resource(show_spinner=False)
 def get_writer() -> RecommendationWriter:
     return RecommendationWriter()
+
+
+def _current_llm_settings() -> dict[str, object]:
+    return {
+        "temperature": float(st.session_state.get("llm_temperature", 0.3)),
+        "max_new_tokens": int(st.session_state.get("llm_max_new_tokens", 450)),
+        "tone": str(st.session_state.get("llm_tone", "Professional buying guide")),
+        "use_fallback": bool(st.session_state.get("llm_use_fallback", True)),
+    }
 
 
 def _slugify(name: str) -> str:
@@ -288,7 +295,7 @@ def _save_cached_clustering(
             "cache_key": cache_key,
             "row_count": row_count,
             "best_k": best_k,
-            "min_clusters": 2,
+            "min_clusters": MIN_CLUSTERS,
             "max_clusters": MAX_CLUSTERS,
             "silhouette_scores": {str(k): v for k, v in scores.items()},
             "cluster_sizes": cluster_sizes,
@@ -508,31 +515,6 @@ def _make_figures(embeddings: np.ndarray, labels: np.ndarray, best_k: int, score
     plt.close(fig)
 
 
-def _silhouette_altair_chart(scores: dict[int, float], best_k: int) -> None:
-    if not scores:
-        return
-    chart_data = pd.DataFrame([
-        {"k": k, "Silhouette score": v, "Selected": "Selected k" if k == best_k else "Other"}
-        for k, v in sorted(scores.items())
-    ])
-    chart = (
-        alt.Chart(chart_data)
-        .mark_bar()
-        .encode(
-            x=alt.X("k:O", title="k (number of clusters)"),
-            y=alt.Y("Silhouette score:Q"),
-            color=alt.Color(
-                "Selected:N",
-                scale=alt.Scale(domain=["Selected k", "Other"], range=["#22c55e", "#5b8def"]),
-                legend=alt.Legend(title=None),
-            ),
-            tooltip=[alt.Tooltip("k:O"), alt.Tooltip("Silhouette score:Q", format=".4f")],
-        )
-        .properties(title="Silhouette score by k (green = selected)", height=300)
-    )
-    st.altair_chart(chart, use_container_width=True)
-
-
 def _render_clustering_figures() -> None:
     st.markdown("**Clustering figures**")
     fig_silhouette = FIGURES_DIR / "silhouette_scores.png"
@@ -569,95 +551,38 @@ def _file_row(label: str, path: Path, mime: str, description: str) -> None:
         action.markdown("-")
 
 
-def _render_playground() -> None:
-    st.subheader("Sentiment Playground")
-    st.caption(
-        "Calls `POST /predict-sentiment`. The endpoint uses a hint-word heuristic, "
-        "not a trained classifier."
+def _top_three_overview(insights: list[dict]) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for insight in insights:
+        picks = insight.get("top_products", [])
+        row = {
+            "Category": insight["category_name"],
+            "Reviews": insight["review_count"],
+            "Avg rating": insight["avg_rating"],
+            "Positive %": round(insight["sentiment_ratio"]["positive"] * 100, 1),
+        }
+        for index, label in enumerate(["Best product", "Runner up", "Third pick"]):
+            product = picks[index] if index < len(picks) else None
+            row[label] = product["name"] if product else "-"
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _render_top_three_table(insights: list[dict]) -> None:
+    st.dataframe(
+        _top_three_overview(insights),
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Category": st.column_config.TextColumn(width="medium"),
+            "Reviews": st.column_config.NumberColumn(width="small"),
+            "Avg rating": st.column_config.NumberColumn(width="small", format="%.2f"),
+            "Positive %": st.column_config.NumberColumn(width="small", format="%.1f%%"),
+            "Best product": st.column_config.TextColumn(width="large"),
+            "Runner up": st.column_config.TextColumn(width="large"),
+            "Third pick": st.column_config.TextColumn(width="large"),
+        },
     )
-    with st.expander("Hint words used by the heuristic"):
-        st.markdown(
-            "**Positive:** great, excellent, love, fast, reliable, perfect, best, easy, happy  \n"
-            "**Negative:** bad, broken, slow, terrible, poor, failed, waste, return, "
-            "disappointed, worst"
-        )
-
-    examples = {
-        "Positive": "The setup was easy and the battery life is great.",
-        "Negative": "The remote is broken and the screen is terrible.",
-        "Neutral": "Arrived on time and matches the description.",
-        "Mixed": "Great picture but the sound is terrible.",
-    }
-    st.markdown("**Quick examples**")
-    cols = st.columns(len(examples))
-    for col, (label, text) in zip(cols, examples.items()):
-        if col.button(label, key=f"ex-{label}"):
-            st.session_state.playground_text = text
-
-    text_input = st.text_area(
-        "Review text",
-        value=st.session_state.get("playground_text", ""),
-        height=120,
-        key="playground_textarea",
-    )
-    if st.button("Predict sentiment", type="primary", disabled=not text_input.strip()):
-        try:
-            with st.spinner("Calling /predict-sentiment..."):
-                resp = requests.post(f"{API_URL}/predict-sentiment", json={"text": text_input}, timeout=30)
-            if resp.ok:
-                label = resp.json()["sentiment"]
-                color = {"positive": "green", "negative": "red", "neutral": "gray"}.get(label, "gray")
-                st.markdown(f"### Result: :{color}[**{label.upper()}**]")
-                with st.expander("Raw response"):
-                    st.json(resp.json())
-            else:
-                st.error(resp.text)
-        except requests.exceptions.ConnectionError as exc:
-            st.error(f"Cannot reach the API at `{API_URL}`. Is FastAPI running?\n\n{exc}")
-
-    st.markdown("**Heuristic vs rating agreement**")
-    st.caption("Scores up to 2,000 loaded reviews and compares the heuristic to the rating-based label.")
-    clustered_df = st.session_state.get("clustered_df")
-    if st.button("Compute agreement", key="compute-heuristic-agreement"):
-        if clustered_df is None or "reviews.text" not in clustered_df.columns:
-            st.warning("No clustered reviews in memory yet. Run the pipeline first.")
-        else:
-            sample_n = min(2000, len(clustered_df))
-            sample = clustered_df.sample(sample_n, random_state=42).copy()
-            analyzer = get_sentiment_analyzer()
-            with st.spinner(f"Scoring {sample_n:,} reviews..."):
-                sample["heuristic"] = [analyzer.predict_text(t) for t in sample["reviews.text"].astype(str)]
-            agreement = float((sample["heuristic"] == sample["sentiment"]).mean())
-            confusion = (
-                sample.groupby(["sentiment", "heuristic"])
-                .size()
-                .unstack(fill_value=0)
-                .reindex(index=["negative", "neutral", "positive"], fill_value=0)
-                .reindex(columns=["negative", "neutral", "positive"], fill_value=0)
-            )
-            per_class = (
-                sample.groupby("sentiment")
-                .apply(lambda g: float((g["heuristic"] == g["sentiment"]).mean()), include_groups=False)
-                .rename("agreement")
-                .reset_index()
-            )
-            per_class["agreement"] = per_class["agreement"].map(lambda value: f"{value:.1%}")
-            st.session_state.heuristic_eval = {
-                "agreement": agreement,
-                "n": sample_n,
-                "per_class": per_class,
-                "confusion": confusion,
-            }
-
-    eval_result = st.session_state.get("heuristic_eval")
-    if eval_result is not None:
-        left, right = st.columns([1, 2])
-        with left:
-            st.metric("Overall agreement", f"{eval_result['agreement']:.1%}", f"n = {eval_result['n']:,}")
-            st.dataframe(eval_result["per_class"], use_container_width=True, hide_index=True)
-        with right:
-            st.markdown("**Confusion matrix**")
-            st.dataframe(eval_result["confusion"], use_container_width=True)
 
 
 def _render_insights() -> None:
@@ -668,6 +593,8 @@ def _render_insights() -> None:
         return
 
     st.subheader(f"Insights - {len(insights)} discovered categories")
+    st.markdown("### Top 3 products by category")
+    _render_top_three_table(insights)
     for insight in insights:
         cat_id = insight["category_id"]
         cat_name = insight["category_name"]
@@ -684,16 +611,12 @@ def _render_insights() -> None:
             for complaint in insight["complaints"]:
                 st.write(f"- {complaint}")
 
-            if clustered_df is not None:
-                cat_df = clustered_df[clustered_df["category_id"] == cat_id]
-                if not cat_df.empty:
-                    products = sorted(cat_df["name"].astype(str).unique())
-                    chosen = st.selectbox("Drill into a product", ["-"] + products, key=f"product-{cat_id}")
-                    if chosen != "-":
-                        rows = cat_df[cat_df["name"] == chosen][["reviews.rating", "sentiment", "reviews.text"]]
-                        st.dataframe(rows, use_container_width=True, hide_index=True)
-
             st.markdown("**Recommendation article**")
+            best_product = insight["top_products"][0]["name"] if insight["top_products"] else "the top-ranked product"
+            st.caption(
+                f"This category-level article is generated from the aggregated insights above. "
+                f"Its Best overall pick is the top-ranked product: {best_product}."
+            )
             article = st.session_state.articles.get(cat_id)
             col_gen, col_regen, col_dl = st.columns(3)
             gen_clicked = col_gen.button("Generate", key=f"gen-{cat_id}", disabled=bool(article))
@@ -709,13 +632,24 @@ def _render_insights() -> None:
             if gen_clicked or regen_clicked:
                 with st.spinner("Writing recommendation article..."):
                     writer = get_writer()
-                    article = writer.generate(insight)
+                    article = writer.generate(insight, **_current_llm_settings())
                     st.session_state.articles[cat_id] = article
                     BLOGPOSTS_DIR.mkdir(parents=True, exist_ok=True)
                     (BLOGPOSTS_DIR / f"{_slugify(cat_name)}.md").write_text(article, encoding="utf-8")
                     st.rerun()
             if article:
                 st.markdown(article)
+
+            if clustered_df is not None:
+                cat_df = clustered_df[clustered_df["category_id"] == cat_id]
+                if not cat_df.empty:
+                    products = sorted(cat_df["name"].astype(str).unique())
+                    st.markdown("**Review drill-down**")
+                    st.caption("Inspect raw review rows for any product in this category. This does not change the category-level article above.")
+                    chosen = st.selectbox("Choose a product to inspect", ["-"] + products, key=f"product-{cat_id}")
+                    if chosen != "-":
+                        rows = cat_df[cat_df["name"] == chosen][["reviews.rating", "sentiment", "reviews.text"]]
+                        st.dataframe(rows, use_container_width=True, hide_index=True)
 
 
 RUN_HISTORY_PATH = OUTPUTS_DIR / "runs_history.json"
@@ -759,6 +693,11 @@ def _render_run_history(current_ts: str | None = None) -> None:
             "Method": cfg.get("vector_method", ""),
             "k": res.get("best_k", "?"),
             "k mode": cfg.get("k_mode", ""),
+            "Articles": "yes" if cfg.get("generate_articles", True) else "no",
+            "Temp": cfg.get("llm_temperature", None),
+            "Max length": cfg.get("llm_max_new_tokens", None),
+            "Tone": cfg.get("llm_tone", "—"),
+            "Fallback": "yes" if cfg.get("llm_use_fallback", True) else "no",
             "Silhouette": round(sil, 3) if sil is not None else "—",
             "Cluster names": " | ".join(c["name"] for c in cats),
             "Reviews": res.get("review_count", ""),
@@ -775,6 +714,11 @@ def _render_run_history(current_ts: str | None = None) -> None:
             "Method": st.column_config.TextColumn(width="medium"),
             "k": st.column_config.NumberColumn(width="small"),
             "k mode": st.column_config.TextColumn(width="medium"),
+            "Articles": st.column_config.TextColumn(width="small"),
+            "Temp": st.column_config.NumberColumn(width="small", format="%.1f"),
+            "Max length": st.column_config.NumberColumn(width="small"),
+            "Tone": st.column_config.TextColumn(width="medium"),
+            "Fallback": st.column_config.TextColumn(width="small"),
             "Silhouette": st.column_config.TextColumn(width="small"),
             "Cluster names": st.column_config.TextColumn(width="large"),
             "Reviews": st.column_config.NumberColumn(width="small"),
@@ -827,6 +771,11 @@ def _render_runs_tab() -> None:
             "k mode": cfg.get("k_mode", ""),
             "Cluster cols": ", ".join(cfg.get("clustering_columns", [])),
             "Naming cols": ", ".join(cfg.get("naming_columns", [])),
+            "Articles": "yes" if cfg.get("generate_articles", True) else "no",
+            "Temp": cfg.get("llm_temperature", None),
+            "Max length": cfg.get("llm_max_new_tokens", None),
+            "Tone": cfg.get("llm_tone", "—"),
+            "Fallback": "yes" if cfg.get("llm_use_fallback", True) else "no",
             "Silhouette": round(sil, 3) if sil is not None else None,
             "Cluster names": " | ".join(c["name"] for c in cats),
             "Reviews": res.get("review_count", ""),
@@ -857,6 +806,11 @@ def _render_runs_tab() -> None:
             "k mode": st.column_config.TextColumn(width="medium"),
             "Cluster cols": st.column_config.TextColumn(width="medium"),
             "Naming cols": st.column_config.TextColumn(width="medium"),
+            "Articles": st.column_config.TextColumn(width="small"),
+            "Temp": st.column_config.NumberColumn(width="small", format="%.1f"),
+            "Max length": st.column_config.NumberColumn(width="small"),
+            "Tone": st.column_config.TextColumn(width="medium"),
+            "Fallback": st.column_config.TextColumn(width="small"),
             "Silhouette": st.column_config.NumberColumn(width="small", format="%.3f"),
             "Cluster names": st.column_config.TextColumn(width="large"),
             "Reviews": st.column_config.NumberColumn(width="small"),
@@ -945,6 +899,12 @@ def _render_runs_tab() -> None:
                 ("Naming columns",      ", ".join(cfg.get("naming_columns", []))),
                 ("Cluster count",       k_detail),
                 ("Actual k",            res.get("best_k", "?")),
+                ("Generate articles",   "yes" if cfg.get("generate_articles", True) else "no"),
+                ("LLM temperature",      cfg.get("llm_temperature", "—")),
+                ("LLM max length",       cfg.get("llm_max_new_tokens", "—")),
+                ("Article tone",         cfg.get("llm_tone", "—")),
+                ("LLM fallback",         "yes" if cfg.get("llm_use_fallback", True) else "no"),
+                ("Prompt preview",       "yes" if cfg.get("llm_show_prompt_preview", False) else "no"),
                 ("Silhouette",          f"{sil:.3f}" if sil is not None else "— (Keyword taxonomy or too few samples)"),
             ])
 
@@ -1002,8 +962,8 @@ def _render_artifacts() -> None:
         st.info("No generated Markdown articles yet.")
 
 
-tab_pipeline, tab_insights, tab_playground, tab_runs, tab_artifacts = st.tabs(
-    ["Analytics Pipeline", "Insights", "Sentiment Playground", "Run History", "Output Artifacts"]
+tab_pipeline, tab_runs, tab_artifacts = st.tabs(
+    ["Analytics Pipeline", "Run History", "Output Artifacts"]
 )
 
 with tab_pipeline:
@@ -1040,105 +1000,147 @@ with tab_pipeline:
             st.warning(f"No CSV files found in `{RAW_DATA_DIR}`.")
 
     can_run = uploaded is not None if input_mode == "Upload a single CSV" else bool(raw_csvs)
-    st.markdown("### Clustering controls")
+    st.markdown("### Clustering setup")
     st.caption(
-        "These controls affect Stage 4/5. After changing category inference, feature "
-        "input columns, feature method, or k settings, choose **Delete cache before processing** before running again."
+        f"Default setup: TF-IDF terms over the normalized category signal, "
+        f"then KMeans creates {DEFAULT_CLUSTERS} product groups."
     )
-    clustering_columns = st.multiselect(
-        "Input columns for clustering",
-        ["name", "categories", "reviews.text", "reviews.rating", "sentiment"],
-        default=["categories"],
-        key=f"clustering_columns_{_rc}",
-        help=(
-            "These columns are concatenated into one document per product before clustering.\n\n"
-            "• **name + categories** — best for product-type clusters (laptop, tablet, cable…). "
-            "The cluster can only separate products that differ in these fields.\n"
-            "• **reviews.text** — adds review wording; useful when category labels are generic.\n"
-            "• **reviews.rating / sentiment** — pulls quality/opinion into the cluster signal; "
-            "use only when you want clusters split by satisfaction, not product type."
-        ),
-    )
-    if not clustering_columns:
-        st.warning("Select at least one clustering input column. Defaulting to `name`.")
-        clustering_columns = ["name"]
-    naming_columns = st.multiselect(
-        "Input columns for cluster naming",
-        ["name", "categories", "reviews.text"],
-        default=["categories"],
-        key=f"naming_columns_{_rc}",
-        help=(
-            "These text columns are used to derive a readable label for each cluster via TF-IDF.\n\n"
-            "TF-IDF rewards terms that appear frequently in one cluster but rarely across others — "
-            "it highlights what makes each cluster distinctive.\n\n"
-            "• **name + categories** — product names and category labels drive the cluster title (e.g. 'Tablet Speaker').\n"
-            "• **reviews.text** — review wording contributes; useful when product names are too generic.\n\n"
-            "Only text columns are available here — numeric and label columns carry no term signal for naming."
-        ),
-    )
-    if not naming_columns:
-        st.warning("Select at least one naming column. Defaulting to `name`.")
-        naming_columns = ["name"]
-    col_method, col_k_mode, col_k_value, col_k_max = st.columns([2, 2, 1, 1])
-    vector_method = col_method.selectbox(
-        "Feature method",
-        [
-            "Keyword taxonomy",
-            "TF-IDF terms",
-            "TF-IDF + Agglomerative",
-            "MiniLM embeddings",
-        ],
-        index=1,
-        key=f"vector_method_{_rc}",
-        help=(
-            "How product documents are converted to numbers before clustering.\n\n"
-            "• **Keyword taxonomy** — rule-based labels (Laptop, Tablet, Cable, Case, Speaker…). "
-            "Ignores k and silhouette entirely; number of clusters = number of matched rules.\n"
-            "• **TF-IDF terms** — bag-of-words on product/category text → KMeans. "
-            "Best general choice; keeps product terms explicit.\n"
-            "• **TF-IDF + Agglomerative** — same features but hierarchical clustering instead of KMeans.\n"
-            "• **MiniLM embeddings** — semantic sentence embeddings → KMeans. "
-            "Better when review text is included and you want meaning over keywords."
-        ),
-    )
-    k_mode = col_k_mode.radio(
-        "Cluster count",
-        ["Force k", "Auto by silhouette"],
-        horizontal=True,
-        disabled=vector_method == "Keyword taxonomy",
-        key=f"k_mode_{_rc}",
-        help=(
-            "• **Force k** — cluster into exactly the number you choose. "
-            "Use this when you have a clear idea of the product categories (e.g. 6 for laptop/tablet/cable/case/speaker/reader).\n"
-            "• **Auto by silhouette** — sweeps k from 2 to Max auto k and picks the mathematically best split. "
-            "Often chooses a small k (2–3) because broad groups score well; override with Force k if you want finer categories.\n\n"
-            "Disabled for Keyword taxonomy (cluster count is determined by keyword rules)."
-        ),
-    )
-    forced_k = col_k_value.number_input(
-        "Forced k",
-        min_value=2,
-        max_value=12,
-        value=6,
-        step=1,
-        disabled=vector_method == "Keyword taxonomy",
-        key=f"forced_k_{_rc}",
-        help="Exact number of clusters when using Force k. A value of 6 suits laptop/tablet/cable/case/speaker/reader splits.",
-    )
-    max_k_to_test = col_k_max.number_input(
-        "Max auto k",
-        min_value=2,
-        max_value=12,
-        value=6,
-        step=1,
-        disabled=vector_method == "Keyword taxonomy",
-        key=f"max_k_{_rc}",
-        help="Upper bound of the silhouette sweep when using Auto by silhouette. The app tries every k from 2 to this value and picks the best score.",
-    )
-    if vector_method == "Keyword taxonomy":
-        st.info(
-            "Keyword taxonomy ignores k and silhouette. It creates categories directly "
-            "from keyword rules, so the number of categories depends on matched labels."
+    clustering_columns = ["categories"]
+    naming_columns = ["categories"]
+    vector_method = "TF-IDF terms"
+    k_mode = "Force k"
+    forced_k = DEFAULT_CLUSTERS
+    max_k_to_test = MAX_CLUSTERS
+
+    with st.expander("Advanced clustering settings", expanded=True):
+        st.caption(
+            "Use these controls for experiments. For the project deliverable, keep the default "
+            "MiniLM + KMeans path so categories are discovered from product/review text rather than the source category column."
+        )
+        clustering_columns = st.multiselect(
+            "Input columns for clustering",
+            ["name", "categories", "reviews.text", "reviews.rating", "sentiment"],
+            default=clustering_columns,
+            key=f"clustering_columns_{_rc}",
+            help=(
+                "These columns are concatenated into one document per product before clustering. "
+                "The professional default avoids `categories` because the project asks us to discover categories."
+            ),
+        )
+        if not clustering_columns:
+            st.warning("Select at least one clustering input column. Defaulting to `name`.")
+            clustering_columns = ["name"]
+
+        naming_columns = st.multiselect(
+            "Input columns for cluster naming",
+            ["name", "categories", "reviews.text"],
+            default=naming_columns,
+            key=f"naming_columns_{_rc}",
+            help="TF-IDF derives readable names from these text columns. Product/review text is the safest default.",
+        )
+        if not naming_columns:
+            st.warning("Select at least one naming column. Defaulting to `name`.")
+            naming_columns = ["name"]
+
+        col_method, col_k_mode, col_k_value, col_k_max = st.columns([2, 2, 1, 1])
+        vector_method = col_method.selectbox(
+            "Feature method",
+            [
+                "MiniLM embeddings",
+                "TF-IDF terms",
+                "TF-IDF + Agglomerative",
+                "Keyword taxonomy",
+            ],
+            index=1,
+            key=f"vector_method_{_rc}",
+            help="MiniLM embeddings + KMeans is the canonical project path. Other options are for comparison.",
+        )
+        k_mode = col_k_mode.radio(
+            "Cluster count",
+            ["Auto by silhouette", "Force k"],
+            index=1,
+            horizontal=True,
+            disabled=vector_method == "Keyword taxonomy",
+            key=f"k_mode_{_rc}",
+            help=f"Auto mode sweeps k from {MIN_CLUSTERS} to Max auto k and picks the best silhouette score.",
+        )
+        forced_k = col_k_value.number_input(
+            "Forced k",
+            min_value=MIN_CLUSTERS,
+            max_value=MAX_CLUSTERS,
+            value=DEFAULT_CLUSTERS,
+            step=1,
+            disabled=vector_method == "Keyword taxonomy",
+            key=f"forced_k_{_rc}",
+        )
+        max_k_to_test = col_k_max.number_input(
+            "Max auto k",
+            min_value=MIN_CLUSTERS,
+            max_value=MAX_CLUSTERS,
+            value=MAX_CLUSTERS,
+            step=1,
+            disabled=vector_method == "Keyword taxonomy",
+            key=f"max_k_{_rc}",
+            help=f"Upper bound of the silhouette sweep. The app tries every k from {MIN_CLUSTERS} to this value.",
+        )
+        if vector_method == "Keyword taxonomy":
+            st.info(
+                "Keyword taxonomy ignores k and silhouette. It creates categories directly "
+                "from keyword rules, so the number of categories depends on matched labels."
+            )
+
+    with st.expander("LLM article settings", expanded=True):
+        generate_articles = st.checkbox(
+            "Generate recommendation articles",
+            value=True,
+            key="llm_generate_articles",
+            help="When enabled, Stage 7 writes one Markdown buying guide per discovered category.",
+        )
+        col_temp, col_len, col_tone = st.columns([1, 1, 2])
+        llm_temperature = col_temp.slider(
+            "Temperature",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.3,
+            step=0.1,
+            key="llm_temperature",
+            help="Lower values keep the article more focused. 0.3 is a conservative professional default.",
+        )
+        llm_max_new_tokens = col_len.number_input(
+            "Max length",
+            min_value=150,
+            max_value=900,
+            value=450,
+            step=50,
+            key="llm_max_new_tokens",
+            help="Maximum number of generated tokens per category article.",
+        )
+        llm_tone = col_tone.selectbox(
+            "Tone",
+            [
+                "Professional buying guide",
+                "Concise recommendation",
+                "Friendly blog post",
+                "Technical comparison",
+            ],
+            index=0,
+            key="llm_tone",
+        )
+        col_fallback, col_prompt = st.columns(2)
+        llm_use_fallback = col_fallback.checkbox(
+            "Use deterministic fallback",
+            value=True,
+            key="llm_use_fallback",
+            help="If the model is unavailable or produces a weak article, use the structured fallback article.",
+        )
+        show_prompt_preview = col_prompt.checkbox(
+            "Show prompt preview",
+            value=False,
+            key="llm_show_prompt_preview",
+            help="Shows the safe prompt built from aggregated insights only. Raw reviews are never sent.",
+        )
+        st.caption(
+            "Model: google/flan-t5-base | Raw reviews sent: No | Input: aggregated category insights only"
         )
 
     run_mode = st.radio(
@@ -1182,6 +1184,12 @@ with tab_pipeline:
                     ("Cluster count mode", k_mode if vector_method != "Keyword taxonomy" else "disabled for Keyword taxonomy"),
                     ("Forced k", forced_k if vector_method != "Keyword taxonomy" and k_mode == "Force k" else "not used"),
                     ("Max auto k", max_k_to_test if vector_method != "Keyword taxonomy" else "not used"),
+                    ("Generate articles", "yes" if generate_articles else "no"),
+                    ("LLM temperature", llm_temperature),
+                    ("LLM max length", llm_max_new_tokens),
+                    ("Article tone", llm_tone),
+                    ("Deterministic fallback", "yes" if llm_use_fallback else "no"),
+                    ("Prompt preview", "yes" if show_prompt_preview else "no"),
                 ]
             )
 
@@ -1305,26 +1313,6 @@ with tab_pipeline:
                     hide_index=True,
                 )
                 _show_example("clean reviews", df, ["source_file", "name", "categories", "reviews.rating", "reviews.text"])
-                if inferred_categories:
-                    st.markdown("**Example rows with inferred/simple categories**")
-                    inferred_preview = df[
-                        df["categories"].astype(str).isin(
-                            [
-                                "Laptop",
-                                "Tablet",
-                                "Cable",
-                                "Case Sleeve Bag",
-                                "Speaker Audio",
-                                "Remote Streaming TV",
-                                "Headphones",
-                                "Battery Power",
-                                "Camera",
-                                "Keyboard Mouse",
-                                "Uncategorized",
-                            ]
-                        )
-                    ][["name", "categories", "reviews.text"]].head(8)
-                    st.dataframe(inferred_preview, use_container_width=True, hide_index=True)
                 _remember_stage(
                     "Stage 2/7 - Preprocessing",
                     f"Prepared {len(df):,} clean reviews; {inferred_categories:,} row(s) have inferred/simple category labels.",
@@ -1442,8 +1430,8 @@ with tab_pipeline:
                     _cluster_out_s5 = f"Exactly {forced_k} cluster labels per product, mapped back to all {len(df):,} review rows."
                 else:
                     _algo = "AgglomerativeClustering(linkage='ward')" if vector_method == "TF-IDF + Agglomerative" else "KMeans(random_state=42)"
-                    _cluster_proc_s5 = f"Cache checked first. On miss: {_algo} sweeps k=2..{max_k_to_test}; the k with the highest silhouette score is selected."
-                    _cluster_out_s5 = f"Best-k cluster labels (from k=2..{max_k_to_test}) per product, mapped back to all {len(df):,} review rows."
+                    _cluster_proc_s5 = f"Cache checked first. On miss: {_algo} sweeps k={MIN_CLUSTERS}..{max_k_to_test}; the k with the highest silhouette score is selected."
+                    _cluster_out_s5 = f"Best-k cluster labels (from k={MIN_CLUSTERS}..{max_k_to_test}) per product, mapped back to all {len(df):,} review rows."
                 _stage_note(
                     f"{embeddings.shape[0]:,} products × {embeddings.shape[1]} feature dimensions ({vector_method}).",
                     _cluster_proc_s5,
@@ -1459,7 +1447,7 @@ with tab_pipeline:
                         ("Algorithm", "keyword rules" if vector_method == "Keyword taxonomy" else ("AgglomerativeClustering(linkage='ward')" if vector_method == "TF-IDF + Agglomerative" else 'KMeans(random_state=42, n_init="auto")')),
                         ("k mode", k_mode),
                         ("Forced k", forced_k if k_mode == "Force k" and vector_method != "Keyword taxonomy" else "not used"),
-                        ("Auto k range", f"2..{max_k_to_test}" if vector_method != "Keyword taxonomy" else "not used"),
+                        ("Auto k range", f"{MIN_CLUSTERS}..{max_k_to_test}" if vector_method != "Keyword taxonomy" else "not used"),
                         ("Selection metric", "keyword label match" if vector_method == "Keyword taxonomy" else ("highest silhouette score" if k_mode == "Auto by silhouette" else "manual business choice")),
                     ]
                 )
@@ -1493,10 +1481,10 @@ with tab_pipeline:
                         best_k = len(set(labels.tolist()))
                         st.write(f"Keyword taxonomy created {best_k} label(s): {', '.join(taxonomy_names.values())}.")
                     else:
-                        min_k = 2
+                        min_k = MIN_CLUSTERS
                         max_k = min(int(max_k_to_test), n_samples - 1)
                         if n_samples < min_k + 1:
-                            best_k = 1
+                            best_k = max(1, n_samples - 1)
                             st.write(f"Too few samples for silhouette; using k={best_k}.")
                         else:
                             for k in range(min_k, max_k + 1):
@@ -1545,7 +1533,6 @@ with tab_pipeline:
                     st.write(f"Saved clustering cache `{labels_path.name}` for future runs.")
 
                 _make_figures(embeddings, labels, best_k, scores)
-                _silhouette_altair_chart(scores, best_k)
                 fig_cluster = FIGURES_DIR / "cluster_visualization.png"
                 if fig_cluster.exists():
                     st.markdown("**Cluster visualization (PCA 2D)**")
@@ -1645,36 +1632,56 @@ with tab_pipeline:
         st.session_state.articles = {}
 
         with slot_stage_7:
-            with st.status("Stage 7/7 - LLM Summarization", expanded=True) as status:
-                _stage_note(
-                    f"{len(insights)} aggregated category insight dictionaries ({', '.join(i['category_name'] for i in insights)}).",
-                    "FLAN-T5 (`google/flan-t5-base`) generates one Markdown recommendation article per category from the insight summary only — raw review text is never sent to the model. Falls back to a deterministic Markdown template if generation fails.",
-                    f"{len(insights)} Markdown file(s) written to `{BLOGPOSTS_DIR.name}/`.",
-                )
-                _config_table(
-                    [
-                        ("Input data", "aggregated category insight dictionaries"),
-                        ("Raw review text sent to LLM", "no"),
-                        ("Summary model", "google/flan-t5-base"),
-                        ("Fallback", "deterministic Markdown article"),
-                        ("Output directory", BLOGPOSTS_DIR),
-                    ]
-                )
-                BLOGPOSTS_DIR.mkdir(parents=True, exist_ok=True)
-                writer = get_writer()
-                for i, insight in enumerate(insights, start=1):
-                    prompt = build_safe_prompt(insight)
-                    st.caption(f"Prompt — {insight['category_name']}")
-                    st.code(prompt, language="text")
-                    article = writer.generate(insight)
-                    st.session_state.articles[insight["category_id"]] = article
-                    path = BLOGPOSTS_DIR / f"{_slugify(insight['category_name'])}.md"
-                    path.write_text(article, encoding="utf-8")
-                    st.write(f"{i}/{len(insights)} wrote `{path.name}`")
-                _remember_stage("Stage 7/7 - LLM Summarization", f"Wrote {len(insights)} Markdown recommendation articles.")
-                status.update(label=f"Stage 7/7 - {len(insights)} articles written", state="complete")
+            if generate_articles:
+                with st.status("Stage 7/7 - LLM Summarization", expanded=True) as status:
+                    _stage_note(
+                        f"{len(insights)} aggregated category insight dictionaries ({', '.join(i['category_name'] for i in insights)}).",
+                        "FLAN-T5 (`google/flan-t5-base`) generates one Markdown recommendation article per category from the insight summary only — raw review text is never sent to the model.",
+                        f"{len(insights)} Markdown file(s) written to `{BLOGPOSTS_DIR.name}/`.",
+                    )
+                    _config_table(
+                        [
+                            ("Input data", "aggregated category insight dictionaries"),
+                            ("Raw review text sent to LLM", "no"),
+                            ("Summary model", "google/flan-t5-base"),
+                            ("Temperature", llm_temperature),
+                            ("Max length", llm_max_new_tokens),
+                            ("Tone", llm_tone),
+                            ("Fallback", "deterministic Markdown article" if llm_use_fallback else "disabled"),
+                            ("Prompt preview", "shown" if show_prompt_preview else "hidden"),
+                            ("Output directory", BLOGPOSTS_DIR),
+                        ]
+                    )
+                    BLOGPOSTS_DIR.mkdir(parents=True, exist_ok=True)
+                    writer = get_writer()
+                    for i, insight in enumerate(insights, start=1):
+                        if show_prompt_preview:
+                            st.caption(f"Prompt preview — {insight['category_name']}")
+                            st.code(build_safe_prompt(insight, tone=llm_tone), language="text")
+                        article = writer.generate(
+                            insight,
+                            temperature=llm_temperature,
+                            max_new_tokens=int(llm_max_new_tokens),
+                            tone=llm_tone,
+                            use_fallback=llm_use_fallback,
+                        )
+                        st.session_state.articles[insight["category_id"]] = article
+                        path = BLOGPOSTS_DIR / f"{_slugify(insight['category_name'])}.md"
+                        path.write_text(article, encoding="utf-8")
+                        st.write(f"{i}/{len(insights)} wrote `{path.name}`")
+                    _remember_stage("Stage 7/7 - LLM Summarization", f"Wrote {len(insights)} Markdown recommendation articles.")
+                    status.update(label=f"Stage 7/7 - {len(insights)} articles written", state="complete")
+            else:
+                st.info("Stage 7 skipped because recommendation article generation is disabled.")
+                _remember_stage("Stage 7/7 - LLM Summarization", "Skipped article generation by user setting.")
         progress.progress(100, text="Complete")
-        slot_summary.success(f"Processed {len(df_clustered):,} reviews into {len(insights)} categories.")
+        with slot_summary:
+            st.success(f"Processed {len(df_clustered):,} reviews into {len(insights)} categories.")
+            st.markdown("### Results preview")
+            st.caption(
+                "Top products are ready. Full category details, complaints, product drill-downs, and recommendation articles are shown below."
+            )
+            _render_top_three_table(insights)
 
         _run_ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         _run_record = {
@@ -1687,6 +1694,12 @@ with tab_pipeline:
                 "k_mode": k_mode,
                 "forced_k": int(forced_k),
                 "max_k_to_test": int(max_k_to_test),
+                "generate_articles": bool(generate_articles),
+                "llm_temperature": float(llm_temperature),
+                "llm_max_new_tokens": int(llm_max_new_tokens),
+                "llm_tone": llm_tone,
+                "llm_use_fallback": bool(llm_use_fallback),
+                "llm_show_prompt_preview": bool(show_prompt_preview),
             },
             "results": {
                 "best_k": int(best_k),
@@ -1713,11 +1726,13 @@ with tab_pipeline:
         with slot_summary:
             _render_stage_summary()
 
-with tab_insights:
-    _render_insights()
-
-with tab_playground:
-    _render_playground()
+    if st.session_state.get("insights"):
+        st.divider()
+        st.markdown("## Top Products & Articles")
+        st.caption(
+            "The full results are shown here as well, so users do not have to leave the pipeline tab after processing."
+        )
+        _render_insights()
 
 with tab_runs:
     _render_runs_tab()

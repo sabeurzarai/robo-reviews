@@ -35,51 +35,54 @@ class ProductClusterer:
         return model.encode(texts, show_progress_bar=False, normalize_embeddings=True)
 
     def choose_k(self, embeddings: np.ndarray) -> int:
-        """Pick a cluster count using silhouette score when possible."""
-        n_samples = len(embeddings)
-        min_k = min(2, n_samples)
-        if n_samples < min_k + 1:
-            return 1
+        """Pick a cluster count using silhouette score within the brief's [min, max] range.
 
-        best_k = min_k
+        The project brief requires 4-10 meta categories, so the search is bounded
+        by ``self.min_clusters`` and ``self.max_clusters`` rather than starting at 2.
+        Silhouette is computed only within that range.
+        """
+        n_samples = len(embeddings)
+        if n_samples < self.min_clusters + 1:
+            return max(1, n_samples - 1)
+
+        lo = self.min_clusters
+        hi = min(self.max_clusters, n_samples - 1)
+        if lo > hi:
+            return hi
+
+        best_k = lo
         best_score = -1.0
-        for k in range(min_k, min(self.max_clusters, n_samples - 1) + 1):
+        for k in range(lo, hi + 1):
             labels = KMeans(n_clusters=k, random_state=42, n_init="auto").fit_predict(embeddings)
             score = silhouette_score(embeddings, labels)
             if score > best_score:
                 best_score = score
                 best_k = k
-        logger.info("Selected k=%s for product clustering", best_k)
+        logger.info("Selected k=%s for product clustering (silhouette=%.3f)", best_k, best_score)
         return best_k
 
     def build_product_documents(self, df: pd.DataFrame) -> pd.DataFrame:
         """Create one clustering document per distinct product.
 
-        These documents use only the product name plus the source category text,
-        then the resulting product-level labels are mapped back to every review.
+        Each document combines the product name with a sample of its review text.
+        Reviews carry the strongest semantic signal — what the product *is* and
+        what people use it for — so clusters reflect product behaviour rather
+        than the upstream `categories` label that preprocessing already collapsed.
         """
         rows: list[dict[str, str | int]] = []
         for product_name, product_df in df.groupby("name", sort=True):
-            category_text = (
-                product_df["categories"]
+            sample_reviews = (
+                product_df["reviews.text"]
                 .astype(str)
-                .drop_duplicates()
-                .head(5)
+                .head(10)
                 .tolist()
             )
-            document = " ".join(
-                [
-                    f"Product name: {product_name}.",
-                    f"Product name tokens: {product_name}. {product_name}.",
-                    "Source categories:",
-                    " ".join(category_text),
-                ]
-            )
+            review_excerpt = " ".join(sample_reviews)[:1500]
+            document = f"Product: {product_name}. Reviews: {review_excerpt}"
             rows.append(
                 {
                     "name": str(product_name),
                     "review_count": int(len(product_df)),
-                    "categories": " | ".join(category_text),
                     "cluster_document": document,
                 }
             )

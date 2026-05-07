@@ -39,6 +39,10 @@ class ClusterResponse(BaseModel):
 
 class SummaryRequest(BaseModel):
     category_insight: dict
+    temperature: float = Field(default=0.3, ge=0, le=1)
+    max_new_tokens: int = Field(default=450, ge=150, le=900)
+    tone: str = "Professional buying guide"
+    use_fallback: bool = True
 
 
 class SummaryResponse(BaseModel):
