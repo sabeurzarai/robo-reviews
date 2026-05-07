@@ -152,7 +152,7 @@ Open: `http://localhost:8000/docs` (or `http://127.0.0.1:8000/docs`).
 4. **Module name**: `uvicorn`
 5. **Script parameters**: `backend.main:app --host 127.0.0.1 --port 8000 --reload`
 6. **Working directory**: project root, e.g.
-   `C:\Users\sisaz\PycharmProjects\IronHackProjects\Labs\[w6_d2_Project]\robo-reviews`
+   `C:\path\to\robo-reviews`
 7. **Python interpreter**: the project's `.venv` (PyCharm usually picks this automatically)
 8. **Apply → Run** (or **Debug** for breakpoints)
 
@@ -274,14 +274,12 @@ docker compose down
 
 ## 9. AWS EC2 deployment with Docker
 
-> **Actual instance used**: `i-0d417541e6f5ad699`, region `eu-central-1` (Frankfurt), Elastic IP `18.157.233.122`, type `t3.micro`.
-
 ### 9.1 Launch instance
 
 1. EC2 → **Launch Instance**
 2. Ubuntu Server 22.04 LTS
 3. Instance type: `t3.micro` works for demos; use `t3.medium`+ for comfortable LLM inference
-4. Key pair: note the name (e.g. `key-0878c9c9551cee5f`) — you may not need the `.pem` if using CloudShell
+4. Key pair: note the name — you may not need the `.pem` if using EC2 Instance Connect
 5. Security group inbound rules — all set to `0.0.0.0/0`:
 
 ```
@@ -298,7 +296,7 @@ docker compose down
 Open **CloudShell** from the AWS console top bar. Make sure the region matches your instance (e.g. `eu-central-1`).
 
 ```bash
-aws ec2-instance-connect ssh --instance-id i-0d417541e6f5ad699 --region eu-central-1 --os-user ubuntu
+aws ec2-instance-connect ssh --instance-id YOUR_INSTANCE_ID --region eu-central-1 --os-user ubuntu
 ```
 
 > **Important**: always pass `--os-user ubuntu` — without it EC2 Instance Connect defaults to `ec2-user` and gets `Permission denied (publickey)`.
@@ -308,7 +306,7 @@ Type `yes` when prompted about the host fingerprint. You are connected when you 
 #### Alternative: connect with .pem from local PowerShell
 
 ```powershell
-ssh -i "C:\Users\sisaz\Downloads\your-key.pem" ubuntu@18.157.233.122
+ssh -i "C:\path\to\your-key.pem" ubuntu@YOUR_EC2_IP
 ```
 
 If SSH times out, check that port 22 inbound rule source is `0.0.0.0/0` (not a stale IP).
@@ -330,7 +328,7 @@ exit
 
 Reconnect (CloudShell):
 ```bash
-aws ec2-instance-connect ssh --instance-id i-0d417541e6f5ad699 --region eu-central-1 --os-user ubuntu
+aws ec2-instance-connect ssh --instance-id YOUR_INSTANCE_ID --region eu-central-1 --os-user ubuntu
 ```
 
 Install Docker Compose standalone binary:
@@ -346,7 +344,7 @@ docker-compose version
 The project is on GitHub at `https://github.com/sabeurzarai/robo-reviews`:
 
 ```bash
-git clone https://github.com/sabeurzarai/robo-reviews.git robo-reviews
+git clone https://github.com/YOUR_USERNAME/robo-reviews.git robo-reviews
 cd robo-reviews
 mkdir -p data/raw
 ```
@@ -355,7 +353,7 @@ mkdir -p data/raw
 
 ### 9.5 Install AWS CLI and download datasets from S3
 
-The datasets are stored in S3 bucket `robo-reviews-data-024820689060-eu-central-1-an`. The EC2 instance must have the `ec2-s3-readonly` IAM role attached (S3ReadOnlyAccess).
+The datasets are stored in S3 bucket `YOUR_S3_BUCKET`. The EC2 instance must have the `ec2-s3-readonly` IAM role attached (S3ReadOnlyAccess).
 
 **Attach IAM role** (first time only):
 1. EC2 Console → select instance → **Aktionen → Sicherheit → IAM-Rolle ändern**
@@ -373,10 +371,10 @@ aws --version
 
 **Download datasets**:
 ```bash
-aws s3 cp s3://robo-reviews-data-024820689060-eu-central-1-an/Datafiniti_Amazon_Consumer_Reviews_of_Amazon_Products.csv data/raw/
-aws s3 cp s3://robo-reviews-data-024820689060-eu-central-1-an/1429_1.csv data/raw/
-aws s3 cp s3://robo-reviews-data-024820689060-eu-central-1-an/Datafiniti_Amazon_Consumer_Reviews_of_Amazon_Products_May19.csv data/raw/
-aws s3 cp s3://robo-reviews-data-024820689060-eu-central-1-an/submissions.csv data/raw/
+aws s3 cp s3://YOUR_S3_BUCKET/Datafiniti_Amazon_Consumer_Reviews_of_Amazon_Products.csv data/raw/
+aws s3 cp s3://YOUR_S3_BUCKET/1429_1.csv data/raw/
+aws s3 cp s3://YOUR_S3_BUCKET/Datafiniti_Amazon_Consumer_Reviews_of_Amazon_Products_May19.csv data/raw/
+aws s3 cp s3://YOUR_S3_BUCKET/submissions.csv data/raw/
 ```
 
 ### 9.6 Build and run
@@ -404,24 +402,24 @@ docker-compose logs --tail=30 streamlit
 Open in browser:
 
 ```
-http://18.157.233.122:8000/docs   ← FastAPI Swagger
-http://18.157.233.122:8501        ← Streamlit UI
+http://YOUR_EC2_IP:8000/docs   ← FastAPI Swagger
+http://YOUR_EC2_IP:8501        ← Streamlit UI
 ```
 
-In the Streamlit sidebar, change the API URL to `http://18.157.233.122:8000`.
+In the Streamlit sidebar, change the API URL to `http://YOUR_EC2_IP:8000`.
 
 ### 9.7 Connect to EC2 (recommended method)
 
 Use **EC2 Instance Connect** from the AWS console — no `.pem` file needed:
 
-1. EC2 Console → select instance `i-0d417541e6f5ad699` → click **Connect**
+1. EC2 Console → select instance `YOUR_INSTANCE_ID` → click **Connect**
 2. Tab: **EC2 Instance Connect** → Connection type: **Public IP** → click **Connect**
 
 This opens a browser-based terminal. Faster and more reliable than CloudShell for SSH.
 
 Alternatively from CloudShell:
 ```bash
-aws ec2-instance-connect ssh --instance-id i-0d417541e6f5ad699 --region eu-central-1 --os-user ubuntu
+aws ec2-instance-connect ssh --instance-id YOUR_INSTANCE_ID --region eu-central-1 --os-user ubuntu
 ```
 
 ### 9.8 Update the deployed app
