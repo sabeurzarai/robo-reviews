@@ -32,6 +32,15 @@ CATEGORY_NAME_STOPWORDS = frozenset({
     "black", "white", "blue", "red", "silver", "gray", "grey",
     "green", "yellow", "tangerine", "orange", "purple", "pink",
     "kid", "proof", "kids",
+    # Generic product-marketing fluff that polluted earlier auto-labels
+    # ("Electronics Top Bag", "Electronics Features Laptop", "Digital Remote Voice").
+    "electronics", "electronic", "digital",
+    "top", "best", "great", "good",
+    "feature", "features", "available", "option", "options",
+    "generation", "gen", "compatible", "accessory", "accessories",
+    "official", "oem", "certified", "refurbished", "bundle", "pack",
+    "product", "products", "item", "items", "brand",
+    "powerfast", "replacement", "international",
 })
 
 _ACRONYMS = {"hd", "tv", "led", "lcd", "usb", "ssd"}
@@ -87,7 +96,7 @@ def derive_category_names(
 
     Returns ``{category_id: {"name": str, "top_terms": [(term, weight), ...]}}``.
     Each cluster becomes one TF-IDF document built from ``naming_columns``
-    (defaults to ``["name"]`` for backward compatibility). TF-IDF rewards terms
+    (defaults to ``["name", "reviews.text"]``). TF-IDF rewards terms
     frequent in this cluster but rare across others — the "what makes this
     cluster different" signal.  Numeric/label columns (rating, sentiment) are
     silently skipped; only text columns carry useful term signal.
@@ -95,7 +104,7 @@ def derive_category_names(
     if "category_id" not in df.columns or "name" not in df.columns:
         raise ValueError("derive_category_names requires 'category_id' and 'name' columns")
 
-    cols = naming_columns or ["name"]
+    cols = naming_columns or ["name", "reviews.text"]
 
     docs_by_id: dict[int, str] = {}
     for cat_id, sub in df.groupby("category_id"):

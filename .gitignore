@@ -8,6 +8,10 @@ __pycache__/
 .DS_Store
 CLAUDE.md
 .claude/
+AGENTS.md
+MEMORY.md
+.claude-*
+.cursorrules
 
 data/
 outputs/*

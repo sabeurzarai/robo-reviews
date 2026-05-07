@@ -113,6 +113,8 @@ def _collapse_category(segment: str) -> str:
 
 def normalize_category_path(category: str) -> str:
     """Extract the last segment of a comma-separated path then collapse to a canonical label."""
+    if category is None or (isinstance(category, float) and pd.isna(category)):
+        return ""
     parts = [p.strip() for p in str(category).split(",") if p.strip()]
     last = parts[-1] if parts else ""
     return _collapse_category(last) if last else ""
