@@ -315,9 +315,14 @@ If SSH times out, check that port 22 inbound rule source is `0.0.0.0/0` (not a s
 
 ### 9.3 Install Docker
 
+> **Note**: `docker-compose-plugin` is not available in the default Ubuntu 24.04 apt repos. Install Docker engine first, then Docker Compose as a standalone binary.
+
 ```bash
 sudo apt update && sudo apt upgrade -y
-sudo apt install -y git docker.io docker-compose-plugin
+# A kernel upgrade may appear — reboot if prompted:
+sudo reboot
+# Reconnect after reboot, then:
+sudo apt install -y git docker.io
 sudo systemctl enable --now docker
 sudo usermod -aG docker ubuntu
 exit
@@ -328,32 +333,59 @@ Reconnect (CloudShell):
 aws ec2-instance-connect ssh --instance-id i-0d417541e6f5ad699 --region eu-central-1 --os-user ubuntu
 ```
 
-Verify:
+Install Docker Compose standalone binary:
 ```bash
-docker --version && docker compose version
+sudo curl -L "https://github.com/docker/compose/releases/download/v2.24.5/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+sudo chmod +x /usr/local/bin/docker-compose
+docker-compose version
+# Expected: Docker Compose version v2.24.5
 ```
 
-### 9.4 Copy the project to EC2
+### 9.4 Clone the project on EC2
 
-**From local PowerShell** (not inside SSH). Square brackets in the path must be escaped:
+The project is on GitHub at `https://github.com/sabeurzarai/robo-reviews`:
 
-```powershell
-scp -i "your-key.pem" -r "C:\Users\sisaz\PycharmProjects\IronHackProjects\Labs\[w6_d2_Project]\robo-reviews" ubuntu@18.157.233.122:~/robo-reviews
+```bash
+git clone https://github.com/sabeurzarai/robo-reviews.git robo-reviews
+cd robo-reviews
+mkdir -p data/raw
 ```
 
-Copy the dataset separately:
+> **Note**: datasets are excluded from git (too large for GitHub). They are stored in S3 and must be downloaded separately (see 9.5).
 
-```powershell
-scp -i "your-key.pem" "C:\Users\sisaz\PycharmProjects\IronHackProjects\Labs\[w6_d2_Project]\robo-reviews\data\raw\Datafiniti_Amazon_Consumer_Reviews_of_Amazon_Products.csv" ubuntu@18.157.233.122:~/robo-reviews/data/raw/
+### 9.5 Install AWS CLI and download datasets from S3
+
+The datasets are stored in S3 bucket `robo-reviews-data-024820689060-eu-central-1-an`. The EC2 instance must have the `ec2-s3-readonly` IAM role attached (S3ReadOnlyAccess).
+
+**Attach IAM role** (first time only):
+1. EC2 Console → select instance → **Aktionen → Sicherheit → IAM-Rolle ändern**
+2. Select `ec2-s3-readonly` (has `AmazonS3ReadOnlyAccess` policy)
+3. Click **IAM-Rolle aktualisieren**
+
+**Install AWS CLI v2**:
+```bash
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+sudo apt install -y unzip
+unzip awscliv2.zip
+sudo ./aws/install
+aws --version
 ```
 
-### 9.5 Build and run
+**Download datasets**:
+```bash
+aws s3 cp s3://robo-reviews-data-024820689060-eu-central-1-an/Datafiniti_Amazon_Consumer_Reviews_of_Amazon_Products.csv data/raw/
+aws s3 cp s3://robo-reviews-data-024820689060-eu-central-1-an/1429_1.csv data/raw/
+aws s3 cp s3://robo-reviews-data-024820689060-eu-central-1-an/Datafiniti_Amazon_Consumer_Reviews_of_Amazon_Products_May19.csv data/raw/
+aws s3 cp s3://robo-reviews-data-024820689060-eu-central-1-an/submissions.csv data/raw/
+```
+
+### 9.6 Build and run
 
 ```bash
 cd ~/robo-reviews
-docker compose up --build -d
-docker compose ps
-docker compose logs -f backend
+docker-compose up --build -d
+docker-compose ps
+docker-compose logs -f backend
 ```
 
 Open:
@@ -365,13 +397,13 @@ http://18.157.233.122:8501        ← Streamlit UI
 
 In the Streamlit sidebar, change the API URL to `http://18.157.233.122:8000`.
 
-### 9.6 Update the deployed app
+### 9.7 Update the deployed app
 
 ```bash
 cd ~/robo-reviews
 git pull
-docker compose down
-docker compose up --build -d
+docker-compose down
+docker-compose up --build -d
 ```
 
 ---
