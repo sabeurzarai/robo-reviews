@@ -9,7 +9,7 @@ Pipeline: **CSV → preprocess → sentiment → embed → cluster → aggregate
 ## Tech stack
 
 - **Python 3.11**, FastAPI + Uvicorn (API), Streamlit (demo UI), Pydantic v2 (schemas)
-- **ML**: scikit-learn (KMeans, silhouette, PCA, TF-IDF), sentence-transformers (`all-MiniLM-L6-v2`), transformers + torch (DistilBERT backbone, FLAN-T5 base for summaries)
+- **ML**: scikit-learn (KMeans, silhouette, PCA, TF-IDF), sentence-transformers (`all-MiniLM-L6-v2`), transformers + torch (`distilbert-base-uncased-finetuned-sst-2-english` for sentiment classification, FLAN-T5 base for summaries)
 - **Data**: pandas, numpy, matplotlib (artifact PNGs)
 - **Deploy**: Docker + docker-compose → AWS EC2 Ubuntu
 - **Tests**: pytest
@@ -25,7 +25,9 @@ src/sentiment.py       Rating→label mapping, DistilBERT touch-load
 src/clustering.py      MiniLM + KMeans, silhouette-picked k
 src/aggregation.py     Score formula, top/worst, complaint mining, TF-IDF cluster naming
 src/summarization.py   FLAN-T5 + deterministic Markdown fallback
-src/pipeline.py        RoboReviewsPipeline.run_from_csv (script entrypoint)
+src/pipeline.py        RoboReviewsPipeline + main() — `python -m src.pipeline --csv …`
+notebooks/01_eda.ipynb              EDA: schema, ratings, length, raw-categories sparsity
+notebooks/02_evaluation.ipynb       Classifier P/R/F1 + confusion matrix, silhouette curve, ROUGE
 streamlit_app/app.py
 tests/test_aggregation.py
 data/raw/Datafiniti_Amazon_Consumer_Reviews_of_Amazon_Products.csv
@@ -46,7 +48,10 @@ pytest                                            # tests
 uvicorn backend.main:app --reload                  # API on :8000, /docs
 streamlit run streamlit_app/app.py                 # UI on :8501
 docker compose up --build                          # full stack (API + UI)
-python -c "from src.pipeline import RoboReviewsPipeline; RoboReviewsPipeline().run_from_csv('data/raw/Datafiniti_Amazon_Consumer_Reviews_of_Amazon_Products.csv')"
+python -m src.pipeline                                        # full pipeline against the canonical Datafiniti CSV
+python -m src.pipeline --csv path/to/reviews.csv              # arbitrary single CSV
+python -m src.pipeline --from-dir data/raw                    # merge every compatible CSV in a directory
+jupyter lab notebooks/                                         # EDA + evaluation notebooks
 ```
 
 Docker sets `PYTHONPATH=/app` and `ROBO_REVIEWS_ROOT`. Locally, run from project root.
@@ -74,7 +79,11 @@ Docker sets `PYTHONPATH=/app` and `ROBO_REVIEWS_ROOT`. Locally, run from project
 2. **Columns required**: `name`, `reviews.text`, `reviews.rating`, `categories` (literal dots).
 3. **Categories come from clustering, not the `categories` column** — that column is kept only to validate input shape.
 4. **LLM never sees raw review text.** `summarization.build_safe_prompt` accepts only the aggregated insight dict. Preserve this for any new prompt path.
-5. **Batch sentiment is rating-based**, not model-based: 1–2 negative, 3 neutral, 4–5 positive. DistilBERT is loaded as the required NLP backbone but is **not** a sentiment classifier — `predict_text` uses a hint-word heuristic.
+5. **Two label sources** live in [src/sentiment.py](src/sentiment.py) and must not be confused:
+   - **Ground truth / batch label**: `sentiment_from_rating` (1–2 negative, 3 neutral, 4–5 positive). Used by `SentimentAnalyzer.label_dataframe` for the aggregation pipeline and as the eval target in [notebooks/02_evaluation.ipynb](notebooks/02_evaluation.ipynb).
+   - **Model prediction**: `SentimentAnalyzer.predict_text` / `predict_texts` / `predict_dataframe` run `distilbert-base-uncased-finetuned-sst-2-english` on review text. SST-2 is binary; outputs with confidence below `NEUTRAL_CONFIDENCE_THRESHOLD` (default 0.85, in `config.py`) are remapped to `neutral`.
+
+   Don't pass model predictions into `aggregate_category_insights` — it expects the rating-derived label. Don't evaluate the model against itself either; the whole point of keeping rating labels separate is to avoid leakage when computing precision/recall/F1.
 
 ## Scoring (per product, within each cluster)
 
@@ -99,7 +108,7 @@ Cluster IDs are integers (`category_id`). Cluster **names** are derived via **TF
 | `GET  /` | Redirects to `/docs` (`include_in_schema=False`) |
 | `GET  /health` | Liveness |
 | `POST /upload-reviews` | multipart CSV → full pipeline → writes `outputs/clustered_reviews.csv` + `outputs/category_insights.json` |
-| `POST /predict-sentiment` | Single text → label (heuristic; see rule 5) |
+| `POST /predict-sentiment` | Single text → label from DistilBERT SST-2; low-confidence → `neutral` (see rule 5) |
 | `POST /cluster-products` | JSON records → insights, no disk write |
 | `GET  /category-insights` | Latest saved `category_insights.json` |
 | `POST /generate-summary` | One aggregated insight dict → `{ "article": str }` |
@@ -113,7 +122,7 @@ Cluster IDs are integers (`category_id`). Cluster **names** are derived via **TF
    - Stage 5 runs KMeans for each k in `[4, 6]`, picks the best by silhouette, writes `figures/silhouette_scores.png` (selected-k bar in green) + `figures/cluster_visualization.png` (PCA 2D) + `metrics/silhouette_scores.json` + `metrics/cluster_sizes.json`.
    - Stage 6 has two visible sub-steps: (a) **TF-IDF naming** — shows a per-cluster table of top terms with weights and the derived name, then writes `metrics/category_names.json`; (b) **Aggregation** — writes the standard outputs plus `metrics/sentiment_distribution.json`.
 2. **📊 Insights** — per-category expander: sentiment distribution chart, rating histogram, top-products table, scatter (rating × volume × positive_ratio), worst product, complaints, product-level drill-down, Generate / Regenerate / Download `.md` for the article.
-3. **🧪 Sentiment Playground** — calls `POST /predict-sentiment` with quick example buttons; surfaces the heuristic's hint-word list.
+3. **🧪 Sentiment Playground** — calls `POST /predict-sentiment` with quick example buttons; the underlying classifier is DistilBERT SST-2 with a confidence threshold for the `neutral` bucket (rule 5).
 4. **🗂️ Artifacts** — file tree of `outputs/` with ✅/❌ status, sizes, download buttons; PNG previews for the two figures.
 
 `st.set_page_config` **must be the first Streamlit command** in the file (before any sidebar widget) or Streamlit raises `StreamlitSetPageConfigMustBeFirstCommandError`.

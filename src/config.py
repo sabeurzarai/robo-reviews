@@ -22,9 +22,13 @@ FIGURES_DIR = OUTPUTS_DIR / "figures"
 PRIMARY_DATASET = "Datafiniti_Amazon_Consumer_Reviews_of_Amazon_Products.csv"
 REQUIRED_COLUMNS = ["name", "reviews.text", "reviews.rating", "categories"]
 
-SENTIMENT_MODEL_NAME = "distilbert-base-uncased"
+SENTIMENT_MODEL_NAME = "distilbert-base-uncased-finetuned-sst-2-english"
 EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 SUMMARY_MODEL_NAME = "google/flan-t5-base"
+
+# SST-2 is binary; we treat low-confidence model outputs as "neutral" so the
+# 3-class evaluation against rating-derived labels is meaningful.
+NEUTRAL_CONFIDENCE_THRESHOLD = 0.85
 
 MIN_CLUSTERS = 4
 MAX_CLUSTERS = 6
